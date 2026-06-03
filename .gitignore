@@ -1,0 +1,13 @@
+# 唯一保留的 CMake 构建目录（与 CMakePresets / README 一致）
+/build/
+
+# 勿在其他路径再生成 CMake 输出，以免堆积多个 build-*
+build-*/
+
+/dist/
+
+*.zip
+c.zip
+
+/.vs/
+CMakeUserPresets.json

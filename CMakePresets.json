@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vcpkg-e-code-c",
+      "displayName": "vcpkg 工具链 (E:/Code/c/vcpkg)",
+      "description": "与本机约定：vcpkg 位于 E:\\Code\\c\\vcpkg。若路径不同，请复制本 preset 并改 CMAKE_TOOLCHAIN_FILE。",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "E:/Code/c/vcpkg/scripts/buildsystems/vcpkg.cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "configurePreset": "vcpkg-e-code-c",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "configurePreset": "vcpkg-e-code-c",
+      "configuration": "Debug"
+    }
+  ]
+}
