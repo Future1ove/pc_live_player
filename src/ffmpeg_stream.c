@@ -385,34 +385,31 @@ static bool process_audio_frame(FFmpegStreamFetcher *fetcher, AVFrame *frame) {
     return audio_output_queue_frame(&fetcher->audio_output, frame, pts_seconds);
 }
 
-static bool drain_decoder_frames(
-    FFmpegStreamFetcher *fetcher,
-    AVCodecContext *codec_ctx,
-    AVFrame *frame,
-    bool is_video) {
+static bool drain_video_frames(FFmpegStreamFetcher *fetcher) {
     int ret;
 
-    if (is_video) {
-        /* 每帧都入画布，便于预览帧率尽量跟源流 */
-        while (!fetcher->stop_requested) {
-            ret = avcodec_receive_frame(codec_ctx, frame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                return true;
-            }
-            if (ret < 0) {
-                set_error(fetcher, "接收视频帧失败", ret);
-                return false;
-            }
-            if (!process_video_frame(fetcher, frame)) {
-                fprintf(stderr, "视频帧转换失败。\n");
-            }
-            av_frame_unref(frame);
+    while (!SDL_AtomicGet(&fetcher->stop_requested)) {
+        ret = avcodec_receive_frame(fetcher->video_codec_ctx, fetcher->video_frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            return true;
         }
-        return true;
+        if (ret < 0) {
+            set_error(fetcher, "接收视频帧失败", ret);
+            return false;
+        }
+        if (!process_video_frame(fetcher, fetcher->video_frame)) {
+            fprintf(stderr, "视频帧转换失败。\n");
+        }
+        av_frame_unref(fetcher->video_frame);
     }
+    return true;
+}
 
-    while (!fetcher->stop_requested) {
-        ret = avcodec_receive_frame(codec_ctx, frame);
+static bool drain_audio_frames(FFmpegStreamFetcher *fetcher) {
+    int ret;
+
+    while (!SDL_AtomicGet(&fetcher->stop_requested)) {
+        ret = avcodec_receive_frame(fetcher->audio_codec_ctx, fetcher->audio_frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             return true;
         }
@@ -420,38 +417,17 @@ static bool drain_decoder_frames(
             set_error(fetcher, "接收音频帧失败", ret);
             return false;
         }
-
-        if (!process_audio_frame(fetcher, frame)) {
+        if (!process_audio_frame(fetcher, fetcher->audio_frame)) {
             fprintf(stderr, "音频帧输出失败。\n");
         }
-
-        av_frame_unref(frame);
+        av_frame_unref(fetcher->audio_frame);
     }
-
     return true;
 }
 
-static int interrupt_callback(void *opaque) {
-    FFmpegStreamFetcher *fetcher = (FFmpegStreamFetcher *)opaque;
-    return fetcher != 0 && fetcher->stop_requested ? 1 : 0;
-}
+/* 以下 _locked 系列队列函数均要求调用方已持有 audio_pkt_mutex */
 
-static void audio_pkt_queue_clear(FFmpegStreamFetcher *fetcher) {
-    int i;
-
-    if (fetcher == 0) {
-        return;
-    }
-
-    for (i = 0; i < fetcher->audio_pkt_count; ++i) {
-        if (fetcher->audio_pkt_queue[i] != 0) {
-            av_packet_free(&fetcher->audio_pkt_queue[i]);
-        }
-    }
-    fetcher->audio_pkt_count = 0;
-}
-
-static bool audio_pkt_queue_push(FFmpegStreamFetcher *fetcher, AVPacket *pkt) {
+static bool audio_pkt_queue_push_locked(FFmpegStreamFetcher *fetcher, AVPacket *pkt) {
     AVPacket *copy;
 
     if (fetcher == 0 || pkt == 0) {
@@ -478,46 +454,85 @@ static bool audio_pkt_queue_push(FFmpegStreamFetcher *fetcher, AVPacket *pkt) {
     }
 
     fetcher->audio_pkt_queue[fetcher->audio_pkt_count++] = copy;
+    SDL_CondSignal(fetcher->audio_pkt_cond);
     return true;
 }
 
-static bool process_audio_packet(FFmpegStreamFetcher *fetcher, AVPacket *pkt) {
-    int ret;
+static AVPacket *audio_pkt_queue_pop_locked(FFmpegStreamFetcher *fetcher) {
+    AVPacket *pkt;
 
-    if (fetcher->audio_codec_ctx == 0 || pkt == 0) {
-        return true;
+    if (fetcher == 0 || fetcher->audio_pkt_count <= 0) {
+        return 0;
     }
 
-    ret = avcodec_send_packet(fetcher->audio_codec_ctx, pkt);
-    if (ret < 0 && ret != AVERROR(EAGAIN)) {
-        set_error(fetcher, "发送音频包到解码器失败", ret);
-        return false;
-    }
-    return drain_decoder_frames(fetcher, fetcher->audio_codec_ctx, fetcher->audio_frame, false);
+    pkt = fetcher->audio_pkt_queue[0];
+    memmove(
+        &fetcher->audio_pkt_queue[0],
+        &fetcher->audio_pkt_queue[1],
+        (size_t)(fetcher->audio_pkt_count - 1) * sizeof(fetcher->audio_pkt_queue[0])
+    );
+    fetcher->audio_pkt_count -= 1;
+    return pkt;
 }
 
-static void drain_pending_audio_packets(FFmpegStreamFetcher *fetcher) {
-    int limit = 16;
-    int processed = 0;
+static void audio_pkt_queue_clear_locked(FFmpegStreamFetcher *fetcher) {
+    int i;
 
-    while (fetcher != 0 && fetcher->audio_pkt_count > 0 && processed < limit &&
-           !fetcher->stop_requested) {
-        AVPacket *pkt = fetcher->audio_pkt_queue[0];
-        memmove(
-            &fetcher->audio_pkt_queue[0],
-            &fetcher->audio_pkt_queue[1],
-            (size_t)(fetcher->audio_pkt_count - 1) * sizeof(fetcher->audio_pkt_queue[0])
-        );
-        fetcher->audio_pkt_count -= 1;
-
-        if (pkt != 0) {
-            if (!process_audio_packet(fetcher, pkt)) {
-                fprintf(stderr, "音频包解码失败。\n");
-            }
-            av_packet_free(&pkt);
-        }
-        processed += 1;
+    if (fetcher == 0) {
+        return;
     }
+
+    for (i = 0; i < fetcher->audio_pkt_count; ++i) {
+        if (fetcher->audio_pkt_queue[i] != 0) {
+            av_packet_free(&fetcher->audio_pkt_queue[i]);
+        }
+    }
+    fetcher->audio_pkt_count = 0;
+}
+
+static int audio_decode_thread(void *userdata) {
+    FFmpegStreamFetcher *fetcher = (FFmpegStreamFetcher *)userdata;
+
+    SDL_LockMutex(fetcher->audio_pkt_mutex);
+    while (!SDL_AtomicGet(&fetcher->stop_requested) || fetcher->audio_pkt_count > 0) {
+        AVPacket *pkt;
+
+        if (fetcher->audio_pkt_count == 0 && !SDL_AtomicGet(&fetcher->stop_requested)) {
+            SDL_CondWaitTimeout(fetcher->audio_pkt_cond, fetcher->audio_pkt_mutex, 50);
+            continue;
+        }
+
+        pkt = audio_pkt_queue_pop_locked(fetcher);
+        if (pkt == 0) {
+            continue;
+        }
+
+        SDL_UnlockMutex(fetcher->audio_pkt_mutex);
+
+        if (avcodec_send_packet(fetcher->audio_codec_ctx, pkt) < 0) {
+            fprintf(stderr, "音频解码线程: 发送包失败。\n");
+        } else {
+            drain_audio_frames(fetcher);
+        }
+        av_packet_free(&pkt);
+
+        SDL_LockMutex(fetcher->audio_pkt_mutex);
+    }
+
+    /* 解码器残余帧 */
+    SDL_UnlockMutex(fetcher->audio_pkt_mutex);
+    if (fetcher->audio_codec_ctx != 0) {
+        avcodec_send_packet(fetcher->audio_codec_ctx, 0);
+        drain_audio_frames(fetcher);
+    }
+
+    fetcher->audio_drain_done = true;
+    return 0;
+}
+
+static int interrupt_callback(void *opaque) {
+    FFmpegStreamFetcher *fetcher = (FFmpegStreamFetcher *)opaque;
+    return fetcher != 0 && SDL_AtomicGet(&fetcher->stop_requested) ? 1 : 0;
 }
 
 static bool open_video_pipeline(FFmpegStreamFetcher *fetcher) {
@@ -726,9 +741,7 @@ static int decode_thread(void *userdata) {
             (fetcher->config.use_gpu ? "直播流连接成功，D3D11VA 硬件解码中" : "直播流连接成功，CPU 解码中")
     );
 
-    while (!fetcher->stop_requested) {
-        drain_pending_audio_packets(fetcher);
-
+    while (!SDL_AtomicGet(&fetcher->stop_requested)) {
         ret = av_read_frame(fetcher->format_ctx, fetcher->packet);
         if (ret == AVERROR_EOF) {
             set_status(fetcher, "流结束");
@@ -742,9 +755,11 @@ static int decode_thread(void *userdata) {
 
         if (fetcher->config.enable_audio &&
             fetcher->packet->stream_index == fetcher->audio_stream_index) {
-            if (!audio_pkt_queue_push(fetcher, fetcher->packet)) {
+            SDL_LockMutex(fetcher->audio_pkt_mutex);
+            if (!audio_pkt_queue_push_locked(fetcher, fetcher->packet)) {
                 fprintf(stderr, "音频包入队失败，已丢弃。\n");
             }
+            SDL_UnlockMutex(fetcher->audio_pkt_mutex);
             av_packet_unref(fetcher->packet);
             continue;
         }
@@ -756,21 +771,16 @@ static int decode_thread(void *userdata) {
                 set_error(fetcher, "发送视频包到解码器失败", ret);
                 continue;
             }
-            if (!drain_decoder_frames(fetcher, fetcher->video_codec_ctx, fetcher->video_frame, true)) {
+            if (!drain_video_frames(fetcher)) {
                 break;
             }
-            drain_pending_audio_packets(fetcher);
         } else {
             av_packet_unref(fetcher->packet);
         }
     }
 
-    drain_pending_audio_packets(fetcher);
-    audio_pkt_queue_clear(fetcher);
-
-    if (fetcher->config.enable_audio) {
-        audio_output_clear(&fetcher->audio_output);
-    }
+    /* 通知音频线程退出 */
+    SDL_CondSignal(fetcher->audio_pkt_cond);
 
     fetcher->running = false;
     return 0;
@@ -785,8 +795,17 @@ bool ffmpeg_stream_init(FFmpegStreamFetcher *fetcher, const AppConfig *config) {
     fetcher->config = *config;
     fetcher->video_stream_index = -1;
     fetcher->audio_stream_index = -1;
+    SDL_AtomicSet(&fetcher->stop_requested, 0);
     fetcher->frame_mutex = SDL_CreateMutex();
     if (fetcher->frame_mutex == 0) {
+        return false;
+    }
+    fetcher->audio_pkt_mutex = SDL_CreateMutex();
+    if (fetcher->audio_pkt_mutex == 0) {
+        return false;
+    }
+    fetcher->audio_pkt_cond = SDL_CreateCond();
+    if (fetcher->audio_pkt_cond == 0) {
         return false;
     }
 
@@ -824,13 +843,26 @@ bool ffmpeg_stream_start(FFmpegStreamFetcher *fetcher) {
         return false;
     }
 
-    fetcher->stop_requested = false;
+    SDL_AtomicSet(&fetcher->stop_requested, 0);
+    fetcher->audio_drain_done = false;
     fetcher->running = true;
+
     fetcher->thread = SDL_CreateThread(decode_thread, "ffmpeg_decode_thread", fetcher);
     if (fetcher->thread == 0) {
         fetcher->running = false;
         return false;
     }
+
+    fetcher->audio_thread = SDL_CreateThread(audio_decode_thread, "audio_decode", fetcher);
+    if (fetcher->audio_thread == 0) {
+        SDL_AtomicSet(&fetcher->stop_requested, 1);
+        SDL_CondSignal(fetcher->audio_pkt_cond);
+        SDL_WaitThread(fetcher->thread, 0);
+        fetcher->thread = 0;
+        fetcher->running = false;
+        return false;
+    }
+
     return true;
 }
 
@@ -914,11 +946,16 @@ void ffmpeg_stream_stop(FFmpegStreamFetcher *fetcher) {
         return;
     }
 
-    fetcher->stop_requested = true;
+    SDL_AtomicSet(&fetcher->stop_requested, 1);
+    SDL_CondSignal(fetcher->audio_pkt_cond);
 
     if (fetcher->thread != 0) {
         SDL_WaitThread(fetcher->thread, 0);
         fetcher->thread = 0;
+    }
+    if (fetcher->audio_thread != 0) {
+        SDL_WaitThread(fetcher->audio_thread, 0);
+        fetcher->audio_thread = 0;
     }
 
     audio_output_close(&fetcher->audio_output);
@@ -932,7 +969,17 @@ void ffmpeg_stream_destroy(FFmpegStreamFetcher *fetcher) {
 
     ffmpeg_stream_stop(fetcher);
 
-    audio_pkt_queue_clear(fetcher);
+    if (fetcher->audio_pkt_mutex != 0) {
+        SDL_LockMutex(fetcher->audio_pkt_mutex);
+        audio_pkt_queue_clear_locked(fetcher);
+        SDL_UnlockMutex(fetcher->audio_pkt_mutex);
+        SDL_DestroyMutex(fetcher->audio_pkt_mutex);
+        fetcher->audio_pkt_mutex = 0;
+    }
+    if (fetcher->audio_pkt_cond != 0) {
+        SDL_DestroyCond(fetcher->audio_pkt_cond);
+        fetcher->audio_pkt_cond = 0;
+    }
 
     if (fetcher->packet != 0) {
         av_packet_free(&fetcher->packet);

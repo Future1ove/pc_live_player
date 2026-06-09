@@ -30,10 +30,14 @@ typedef struct SwsContext SwsContext;
 typedef struct FFmpegStreamFetcher {
     AppConfig config;
     SDL_Thread *thread;
+    SDL_Thread *audio_thread;
     SDL_mutex *frame_mutex;
+    SDL_mutex *audio_pkt_mutex;
+    SDL_cond *audio_pkt_cond;
     bool running;
-    bool stop_requested;
+    SDL_atomic_t stop_requested;
     bool frame_ready;
+    bool audio_drain_done;
     char last_error[APP_STATUS_CAPACITY];
     char status_text[APP_STATUS_CAPACITY];
 
