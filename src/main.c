@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
 
     printf("直播流二维码快速检测器 - C 版本\n");
     printf("URL: %s\n", config.url);
-    printf("解码: %s\n", config.use_gpu ? "GPU(CUDA 优先)" : "CPU");
+    printf("解码: %s\n", config.use_gpu ? "D3D11VA 硬件加速(默认)" : "CPU");
     printf(
         "画质: %s\n",
         config.fast_decode ? "速度优先(最近邻缩放/跳非参考帧)" : "清晰(双三次缩放/完整解码)"

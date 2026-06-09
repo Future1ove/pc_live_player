@@ -3,8 +3,10 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QLineEdit>
+#include <QScreen>
 #include <QSettings>
 #include <QVBoxLayout>
 
@@ -60,6 +62,18 @@ KeyAuthDialog::KeyAuthDialog(QWidget *parent) : QDialog(parent) {
         m_edit->setText(saved);
     }
     m_edit->setFocus();
+
+    adjustSize();
+    setMinimumWidth(qMax(360, minimumWidth()));
+    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+        const QRect avail = screen->availableGeometry();
+        if (width() > avail.width() - 32) {
+            resize(avail.width() - 32, height());
+        }
+        const int x = avail.x() + (avail.width() - width()) / 2;
+        const int y = avail.y() + (avail.height() - height()) / 2;
+        move(x, y);
+    }
 }
 
 void KeyAuthDialog::applyRememberKeyAfterLogin(bool remember, const QString &key) {

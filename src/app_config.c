@@ -11,13 +11,13 @@ void app_set_default_config(AppConfig *config) {
 
     memset(config, 0, sizeof(*config));
     config->use_gpu = true;
-    config->enable_audio = false;
+    config->enable_audio = true;
     config->fast_decode = false;
     config->vsync = false;
-    config->use_native_resolution = false;
-    config->detector_mode = QR_DETECTOR_MODE_FULL_RES;
-    config->output_width = 1920;
-    config->output_height = 1080;
+    config->use_native_resolution = true;
+    config->detector_mode = QR_DETECTOR_MODE_FAST;
+    config->output_width = 0;
+    config->output_height = 0;
     config->roi_ratio = 0.6f;
 }
 

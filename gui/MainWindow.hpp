@@ -8,12 +8,13 @@
 #include <QString>
 
 class QCloseEvent;
+class QShowEvent;
 class QLabel;
 class QTimer;
 class QTextEdit;
+class UrlInputEdit;
 class QPushButton;
 class QCheckBox;
-class QComboBox;
 class QVBoxLayout;
 class QWidget;
 class StreamWorker;
@@ -33,6 +34,7 @@ public slots:
     void clearKeyExpiry();
 
 protected:
+    void showEvent(QShowEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
 private slots:
@@ -48,6 +50,7 @@ private slots:
     void tickKeyExpiryDisplay();
 
 private:
+    void applyInitialWindowGeometry();
     void enterFullscreen();
     void exitFullscreen();
     void showQrPopup(const QString &text);
@@ -59,11 +62,8 @@ private:
     QLabel *m_keyExpiryLabel{nullptr};
     QTimer *m_keyExpiryTimer{nullptr};
     QDateTime m_keyExpiresAt;
-    QTextEdit *m_urlInput{nullptr};
-    QCheckBox *m_gpuCheck{nullptr};
+    UrlInputEdit *m_urlInput{nullptr};
     QCheckBox *m_fullResCheck{nullptr};
-    QCheckBox *m_audioCheck{nullptr};
-    QComboBox *m_resolutionCombo{nullptr};
     QPushButton *m_startBtn{nullptr};
     QPushButton *m_fullscreenBtn{nullptr};
     QPushButton *m_stopBtn{nullptr};

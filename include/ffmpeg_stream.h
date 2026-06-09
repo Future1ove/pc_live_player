@@ -69,6 +69,9 @@ typedef struct FFmpegStreamFetcher {
     /** 待解码音频包（demux 与视频解码解耦，避免视频卡顿时音频饿死） */
     AVPacket *audio_pkt_queue[FFMPEG_AUDIO_PKT_QUEUE_CAP];
     int audio_pkt_count;
+
+    double latest_video_pts_sec;
+    bool latest_video_pts_valid;
 } FFmpegStreamFetcher;
 
 bool ffmpeg_stream_init(FFmpegStreamFetcher *fetcher, const AppConfig *config);
@@ -81,6 +84,10 @@ bool ffmpeg_stream_get_latest_frame(
 );
 /** 当前解码画布宽高（原生模式下首帧后才有效） */
 void ffmpeg_stream_get_canvas_size(const FFmpegStreamFetcher *fetcher, int *out_w, int *out_h);
+/** 最新视频帧 PTS（秒）；无效时 *out_valid=false */
+double ffmpeg_stream_get_latest_video_pts(const FFmpegStreamFetcher *fetcher, bool *out_valid);
+/** 音频主时钟 PTS（秒）；无效时 *out_valid=false */
+double ffmpeg_stream_get_audio_playback_pts(const FFmpegStreamFetcher *fetcher, bool *out_valid);
 void ffmpeg_stream_stop(FFmpegStreamFetcher *fetcher);
 void ffmpeg_stream_destroy(FFmpegStreamFetcher *fetcher);
 

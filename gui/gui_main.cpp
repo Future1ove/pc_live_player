@@ -27,8 +27,9 @@ static bool runInitialLogin(QString *sessionKey, QDateTime *expiresAt) {
 
 int main(int argc, char *argv[]) {
     /* 高 DPI：避免 Windows 对非 DPI 感知程序做位图拉伸（模糊 + 输入框点不中） */
+    /* Round：多显示器/125%/150% 缩放下比 PassThrough 更稳定，减少控件错位或点不中 */
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
-        Qt::HighDpiScaleFactorRoundingPolicy::PassThrough
+        Qt::HighDpiScaleFactorRoundingPolicy::Round
     );
     QApplication app(argc, argv);
     QApplication::setStyle(QStringLiteral("Fusion"));

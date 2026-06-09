@@ -154,6 +154,8 @@ if(BUILD_GUI)
         gui/KeyAuthClient.cpp
         gui/KeyAuthDialog.cpp
         gui/KeyHeartbeat.cpp
+        gui/StreamProvider.cpp
+        gui/UrlInputEdit.cpp
         gui/MainWindow.hpp
         gui/StreamWorker.hpp
         gui/QRPopupDialog.hpp
@@ -162,6 +164,8 @@ if(BUILD_GUI)
         gui/KeyAuthClient.hpp
         gui/KeyAuthDialog.hpp
         gui/KeyHeartbeat.hpp
+        gui/StreamProvider.hpp
+        gui/UrlInputEdit.hpp
     )
 
     if(WIN32)

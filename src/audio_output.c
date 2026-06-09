@@ -41,6 +41,14 @@ static bool get_frame_channel_layout(const AVFrame *frame, AVChannelLayout *layo
     return false;
 }
 
+static int bytes_per_second(const AudioOutput *output) {
+    const int bytes_per_sample = av_get_bytes_per_sample(output->dst_sample_fmt);
+    if (bytes_per_sample <= 0 || output->dst_sample_rate <= 0 || output->dst_channels <= 0) {
+        return 0;
+    }
+    return output->dst_sample_rate * output->dst_channels * bytes_per_sample;
+}
+
 static bool ensure_resample_buffer(AudioOutput *output, int required_size) {
     uint8_t *new_buffer;
 
@@ -140,7 +148,8 @@ bool audio_output_open(AudioOutput *output, int preferred_sample_rate) {
     desired_spec.freq = preferred_sample_rate > 0 ? preferred_sample_rate : output->dst_sample_rate;
     desired_spec.format = AUDIO_S16SYS;
     desired_spec.channels = (Uint8)output->dst_channels;
-    desired_spec.samples = 2048;
+    /* 较小缓冲利于直播低延迟与音画同步 */
+    desired_spec.samples = 1024;
     desired_spec.callback = 0;
 
     output->device_id = SDL_OpenAudioDevice(0, 0, &desired_spec, &output->obtained_spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
@@ -153,16 +162,42 @@ bool audio_output_open(AudioOutput *output, int preferred_sample_rate) {
     output->dst_sample_rate = output->obtained_spec.freq;
     SDL_PauseAudioDevice(output->device_id, 0);
     output->started = true;
+    output->queued_pts_end = 0.0;
+    output->pts_valid = false;
     return true;
 }
 
-bool audio_output_queue_frame(AudioOutput *output, const AVFrame *frame) {
+double audio_output_get_queued_seconds(const AudioOutput *output) {
+    int bps;
+
+    if (output == 0 || output->device_id == 0) {
+        return 0.0;
+    }
+
+    bps = bytes_per_second(output);
+    if (bps <= 0) {
+        return 0.0;
+    }
+
+    return (double)SDL_GetQueuedAudioSize(output->device_id) / (double)bps;
+}
+
+double audio_output_get_playback_pts(const AudioOutput *output) {
+    if (output == 0 || !output->pts_valid) {
+        return -1.0;
+    }
+
+    return output->queued_pts_end - audio_output_get_queued_seconds(output);
+}
+
+bool audio_output_queue_frame(AudioOutput *output, const AVFrame *frame, double pts_seconds) {
     int src_channels;
     int dst_nb_samples;
     int bytes_per_sample;
     int buffer_size;
     int converted_samples;
     int queued_bytes;
+    int bps;
 
     if (output == 0 || frame == 0 || !output->started) {
         return false;
@@ -210,16 +245,29 @@ bool audio_output_queue_frame(AudioOutput *output, const AVFrame *frame) {
     }
 
     queued_bytes = converted_samples * output->dst_channels * bytes_per_sample;
+    bps = bytes_per_second(output);
 
-    {
-        const int bytes_per_sec = output->dst_sample_rate * output->dst_channels * bytes_per_sample;
+    if (bps > 0) {
         const int queued = (int)SDL_GetQueuedAudioSize(output->device_id);
-        /* 背压：队列过长时丢弃新帧，避免整段 ClearQueuedAudio 造成爆音/断续 */
-        if (bytes_per_sec > 0 && queued > bytes_per_sec / 2) {
+        const double queued_sec = (double)queued / (double)bps;
+        const double frame_sec = (double)queued_bytes / (double)bps;
+        /* 目标缓冲约 80–200ms：过长则丢帧，避免音画严重脱节 */
+        if (queued_sec > 0.35) {
             return true;
         }
-        if (bytes_per_sec > 0 && queued > (bytes_per_sec * 3) / 4) {
+        if (queued_sec > 0.22) {
             SDL_ClearQueuedAudio(output->device_id);
+            if (pts_seconds >= 0.0) {
+                output->queued_pts_end = pts_seconds + frame_sec;
+                output->pts_valid = true;
+            }
+        } else if (pts_seconds >= 0.0) {
+            if (!output->pts_valid) {
+                output->queued_pts_end = pts_seconds + frame_sec;
+                output->pts_valid = true;
+            } else {
+                output->queued_pts_end = pts_seconds + frame_sec;
+            }
         }
     }
 
@@ -237,6 +285,8 @@ void audio_output_clear(AudioOutput *output) {
     }
 
     SDL_ClearQueuedAudio(output->device_id);
+    output->queued_pts_end = 0.0;
+    output->pts_valid = false;
 }
 
 void audio_output_close(AudioOutput *output) {
@@ -251,6 +301,8 @@ void audio_output_close(AudioOutput *output) {
     }
 
     output->started = false;
+    output->queued_pts_end = 0.0;
+    output->pts_valid = false;
     output->src_channels = 0;
     output->src_sample_rate = 0;
     output->src_sample_fmt = AV_SAMPLE_FMT_NONE;

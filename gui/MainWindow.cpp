@@ -1,14 +1,20 @@
 #include "MainWindow.hpp"
 
 #include "QRPopupDialog.hpp"
+#include "StreamProvider.hpp"
 #include "StreamWorker.hpp"
+#include "UrlInputEdit.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <utility>
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QScrollArea>
+#include <QShowEvent>
 #include <QDateTime>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -23,7 +29,6 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QCheckBox>
-#include <QComboBox>
 #include <QSizePolicy>
 
 extern "C" {
@@ -37,6 +42,15 @@ QString mainWindowStylesheet() {
         R"(
 QMainWindow { background-color: #080a0e; }
 QWidget#mainCentral { background-color: #080a0e; }
+QWidget#leftPanel, QWidget#rightPanel { background-color: #080a0e; }
+QScrollArea#rightScroll {
+  background-color: #080a0e;
+  border: none;
+}
+QScrollArea#rightScroll QWidget#scrollViewport {
+  background-color: #080a0e;
+  border: none;
+}
 QLabel#panelHeadline {
   color: #f1f5f9;
   font-size: 22px;
@@ -247,10 +261,7 @@ QString videoLabelFullscreenStyle() {
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("直播流二维码检测"));
-    /* 左栏视频区勿设死 1280 最小宽，否则窗口较窄时整段画面被裁切 */
-    setMinimumSize(1024, 680);
-    /* 默认略加宽主窗口，左侧预览区占横向更多比例（见 root stretch） */
-    setGeometry(100, 100, 1580, 920);
+    setMinimumSize(880, 560);
 
     setStyleSheet(mainWindowStylesheet());
 
@@ -262,6 +273,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     root->setSpacing(12);
 
     m_leftWidget = new QWidget;
+    m_leftWidget->setObjectName(QStringLiteral("leftPanel"));
+    m_leftWidget->setAttribute(Qt::WA_StyledBackground, true);
+    m_leftWidget->setMinimumWidth(260);
     m_leftLayout = new QVBoxLayout(m_leftWidget);
     m_leftLayout->setContentsMargins(0, 0, 0, 0);
     m_leftLayout->setSpacing(8);
@@ -285,7 +299,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     /* 左栏预览为主：stretch 大于右侧控制栏，横屏流少留白、画面更大 */
     root->addWidget(m_leftWidget, 5);
 
-    auto *right = new QVBoxLayout;
+    auto *rightScroll = new QScrollArea;
+    rightScroll->setObjectName(QStringLiteral("rightScroll"));
+    rightScroll->setAttribute(Qt::WA_StyledBackground, true);
+    rightScroll->setWidgetResizable(true);
+    rightScroll->setFrameShape(QFrame::NoFrame);
+    rightScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    rightScroll->setMinimumWidth(300);
+    rightScroll->viewport()->setObjectName(QStringLiteral("scrollViewport"));
+    rightScroll->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+
+    auto *rightPanel = new QWidget;
+    rightPanel->setObjectName(QStringLiteral("rightPanel"));
+    rightPanel->setAttribute(Qt::WA_StyledBackground, true);
+    auto *right = new QVBoxLayout(rightPanel);
     right->setSpacing(14);
     right->setContentsMargins(0, 0, 0, 0);
 
@@ -305,46 +332,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     rhLay->addWidget(m_keyExpiryLabel);
     right->addWidget(rightHeader);
 
-    auto *inputGroup = new QGroupBox(QStringLiteral("流与解码"));
+    auto *inputGroup = new QGroupBox(QStringLiteral("直播间"));
     auto *inputLay = new QVBoxLayout(inputGroup);
     inputLay->setSpacing(10);
 
-    m_urlInput = new QTextEdit;
+    m_urlInput = new UrlInputEdit;
     m_urlInput->setPlaceholderText(
-        QStringLiteral("粘贴直播流地址（m3u8 / flv / rtmp 等）…")
+        QStringLiteral("粘贴抖音/小红书直播间链接，或 v.douyin.com 短链…")
     );
-    m_urlInput->setMinimumHeight(72);
-    m_urlInput->setMaximumHeight(120);
+    m_urlInput->setMinimumHeight(qMax(64, fontMetrics().height() * 4 + 12));
+    m_urlInput->setMaximumHeight(qMax(120, fontMetrics().height() * 6 + 16));
     m_urlInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_urlInput->setFocusPolicy(Qt::StrongFocus);
     m_urlInput->setTabChangesFocus(false);
     inputLay->addWidget(m_urlInput);
-
-    m_gpuCheck = new QCheckBox(QStringLiteral("NVIDIA GPU 解码加速"));
-    m_gpuCheck->setChecked(true);
-    inputLay->addWidget(m_gpuCheck);
-
-    m_fullResCheck = new QCheckBox(QStringLiteral("全图识别（关则仅扫画面中央约 60%）"));
-    m_fullResCheck->setChecked(true);
-    inputLay->addWidget(m_fullResCheck);
-
-    m_audioCheck = new QCheckBox(QStringLiteral("播放直播音频"));
-    m_audioCheck->setChecked(false);
-    inputLay->addWidget(m_audioCheck);
-
-    m_resolutionCombo = new QComboBox;
-    m_resolutionCombo->addItem(QStringLiteral("解码分辨率：540p（960×540，省资源）"));
-    m_resolutionCombo->addItem(QStringLiteral("解码分辨率：720p（1280×720）"));
-    m_resolutionCombo->addItem(QStringLiteral("解码分辨率：1080p（1920×1080）"));
-    m_resolutionCombo->addItem(QStringLiteral("解码分辨率：原生（随源流，最大 4K 画布）"));
-    m_resolutionCombo->setCurrentIndex(2);
-    m_resolutionCombo->setToolTip(
-        QStringLiteral(
-            "降低分辨率可减少 CPU/内存占用；原生模式按源流尺寸（超过 4K 时缩放到 4K 内）。"
-            "识别率可能随分辨率略降。"
-        )
-    );
-    inputLay->addWidget(m_resolutionCombo);
 
     right->addWidget(inputGroup);
 
@@ -378,6 +379,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *qrGroup = new QGroupBox(QStringLiteral("当前二维码"));
     auto *qrLay = new QVBoxLayout(qrGroup);
 
+    m_fullResCheck = new QCheckBox(QStringLiteral("全图识别（关则仅扫画面中央约 60%）"));
+    m_fullResCheck->setChecked(false);
+    qrLay->addWidget(m_fullResCheck);
+
     m_currentQrLabel = new QLabel(QStringLiteral("当前：无"));
     m_currentQrLabel->setObjectName(QStringLiteral("currentQrLabel"));
     m_currentQrLabel->setStyleSheet(qrLabelStyleIdle());
@@ -396,6 +401,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_historyText = new QTextEdit;
     m_historyText->setObjectName(QStringLiteral("historyLog"));
     m_historyText->setReadOnly(true);
+    m_historyText->setMinimumHeight(qMax(80, fontMetrics().height() * 5));
+    m_historyText->setMaximumHeight(qMax(200, fontMetrics().height() * 12));
+    m_historyText->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     histLay->addWidget(m_historyText);
 
     auto *clearBtn = new QPushButton(QStringLiteral("清空历史"));
@@ -405,9 +413,38 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     histLay->addWidget(clearBtn);
 
     right->addWidget(histGroup);
-    right->addStretch();
 
-    root->addLayout(right, 2);
+    rightPanel->setMinimumWidth(280);
+    rightScroll->setWidget(rightPanel);
+    root->addWidget(rightScroll, 2);
+}
+
+void MainWindow::applyInitialWindowGeometry() {
+    QScreen *screen = this->screen();
+    if (screen == nullptr) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen == nullptr) {
+        resize(1280, 800);
+        return;
+    }
+
+    const QRect avail = screen->availableGeometry();
+    const int targetW = qBound(minimumWidth(), static_cast<int>(avail.width() * 0.92), 1680);
+    const int targetH = qBound(minimumHeight(), static_cast<int>(avail.height() * 0.90), 980);
+    resize(targetW, targetH);
+    const int x = avail.x() + (avail.width() - width()) / 2;
+    const int y = avail.y() + (avail.height() - height()) / 2;
+    move(x, y);
+}
+
+void MainWindow::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+    static bool s_initialGeometryApplied = false;
+    if (!s_initialGeometryApplied) {
+        s_initialGeometryApplied = true;
+        applyInitialWindowGeometry();
+    }
 }
 
 void MainWindow::setKeyExpiry(const QDateTime &expiresAt) {
@@ -492,9 +529,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 }
 
 void MainWindow::startDetection() {
-    const QString url = m_urlInput->toPlainText().trimmed();
+    const QString url = streamProviderExtractUrl(m_urlInput->toPlainText());
     if (url.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请输入直播流URL"));
+        QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请输入抖音直播间链接"));
         return;
     }
 
@@ -507,6 +544,21 @@ void MainWindow::startDetection() {
         return;
     }
 
+    m_startBtn->setEnabled(false);
+    m_startBtn->setText(QStringLiteral("正在解析…"));
+    m_statusLabel->setText(QStringLiteral("状态 · 正在解析直播间地址…"));
+    QApplication::processEvents();
+
+    StreamResolveResult resolved{};
+    QString resolveErr;
+    if (!streamProviderResolve(url, &resolved, &resolveErr)) {
+        QMessageBox::warning(this, QStringLiteral("解析失败"), resolveErr);
+        m_startBtn->setEnabled(true);
+        m_startBtn->setText(QStringLiteral("开始检测"));
+        m_statusLabel->setText(QStringLiteral("状态 · 解析失败"));
+        return;
+    }
+
     m_lastQr.clear();
     m_qrCount = 0;
     m_historyText->clear();
@@ -515,42 +567,22 @@ void MainWindow::startDetection() {
 
     AppConfig cfg{};
     app_set_default_config(&cfg);
-    const QByteArray urlUtf8 = url.toUtf8();
-    std::snprintf(cfg.url, sizeof(cfg.url), "%s", urlUtf8.constData());
-    cfg.use_gpu = m_gpuCheck->isChecked();
-    cfg.enable_audio = m_audioCheck->isChecked();
+    const QByteArray streamUtf8 = resolved.streamUrl.toUtf8();
+    std::snprintf(cfg.url, sizeof(cfg.url), "%s", streamUtf8.constData());
+    cfg.use_gpu = true;
+    cfg.enable_audio = true;
     cfg.detector_mode =
         m_fullResCheck->isChecked() ? QR_DETECTOR_MODE_FULL_RES : QR_DETECTOR_MODE_FAST;
-    cfg.use_native_resolution = false;
-    switch (m_resolutionCombo->currentIndex()) {
-    case 0:
-        cfg.output_width = 960;
-        cfg.output_height = 540;
-        break;
-    case 1:
-        cfg.output_width = 1280;
-        cfg.output_height = 720;
-        break;
-    case 2:
-        cfg.output_width = 1920;
-        cfg.output_height = 1080;
-        break;
-    case 3:
-        cfg.use_native_resolution = true;
-        cfg.output_width = 0;
-        cfg.output_height = 0;
-        break;
-    default:
-        cfg.output_width = 1920;
-        cfg.output_height = 1080;
-        break;
-    }
-    cfg.fast_decode = !cfg.use_gpu || cfg.use_native_resolution;
+    cfg.use_native_resolution = true;
+    cfg.output_width = 0;
+    cfg.output_height = 0;
+    cfg.fast_decode = false;
     cfg.vsync = false;
 
-    m_startBtn->setEnabled(false);
-    m_startBtn->setText(QStringLiteral("正在连接流地址..."));
-    m_statusLabel->setText(QStringLiteral("状态 · 正在连接直播流…"));
+    m_startBtn->setText(QStringLiteral("正在连接…"));
+    m_statusLabel->setText(
+        QStringLiteral("状态 · 已解析源流，正在连接（%1）…").arg(resolved.qualityHint)
+    );
 
     m_worker = new StreamWorker(this);
     m_worker->setConfig(cfg);
@@ -564,7 +596,7 @@ void MainWindow::startDetection() {
 
     m_stopBtn->setEnabled(true);
     m_urlInput->setEnabled(false);
-    m_resolutionCombo->setEnabled(false);
+    m_fullResCheck->setEnabled(false);
 }
 
 void MainWindow::stopDetection() {
@@ -595,7 +627,7 @@ void MainWindow::stopDetection() {
     m_startBtn->setText(QStringLiteral("开始检测"));
     m_stopBtn->setEnabled(false);
     m_urlInput->setEnabled(true);
-    m_resolutionCombo->setEnabled(true);
+    m_fullResCheck->setEnabled(true);
     m_statusLabel->setText(QStringLiteral("状态 · 已停止"));
 }
 
@@ -626,7 +658,13 @@ void MainWindow::flushPendingVideoFrame() {
     if (target.width() < 1 || target.height() < 1) {
         return;
     }
-    pm = pm.scaled(target, Qt::KeepAspectRatio, Qt::FastTransformation);
+    const qreal dpr = m_videoLabel->devicePixelRatioF();
+    const QSize hiTarget(
+        qMax(1, static_cast<int>(std::lround(target.width() * dpr))),
+        qMax(1, static_cast<int>(std::lround(target.height() * dpr)))
+    );
+    pm = pm.scaled(hiTarget, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    pm.setDevicePixelRatio(dpr);
     m_videoLabel->setPixmap(pm);
 }
 

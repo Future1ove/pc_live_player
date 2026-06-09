@@ -5,8 +5,6 @@
 
 #include <SDL.h>
 
-#include <QDateTime>
-
 extern "C" {
 #include "ffmpeg_stream.h"
 }
@@ -15,9 +13,43 @@ extern "C" {
 #include "qr_detector.h"
 
 namespace {
-constexpr int kMaxCanvasW = 3840;
-constexpr int kMaxCanvasH = 2160;
+constexpr int kMaxCanvasW = 7680;
+constexpr int kMaxCanvasH = 4320;
 constexpr size_t kMaxFrameBytes = static_cast<size_t>(kMaxCanvasW) * static_cast<size_t>(kMaxCanvasH) * 3U;
+/** 视频相对音频主时钟允许的最大超前（秒） */
+constexpr double kAvSyncMaxVideoAheadSec = 0.06;
+/** 视频明显落后时强制刷新画面 */
+constexpr double kAvSyncForceDisplayBehindSec = 0.15;
+/** 等音频追上时的最长自旋（毫秒量级步进） */
+constexpr int kAvSyncSpinMax = 80;
+
+void waitAvSyncThenRefresh(
+    FFmpegStreamFetcher *fetcher,
+    uint8_t *frame_copy,
+    size_t copy_buffer_bytes,
+    uint64_t *sequence,
+    bool enable_audio) {
+    if (!enable_audio || fetcher == nullptr || sequence == nullptr) {
+        return;
+    }
+
+    for (int i = 0; i < kAvSyncSpinMax; ++i) {
+        bool audio_valid = false;
+        bool video_valid = false;
+        const double audio_pts = ffmpeg_stream_get_audio_playback_pts(fetcher, &audio_valid);
+        const double video_pts = ffmpeg_stream_get_latest_video_pts(fetcher, &video_valid);
+        if (!audio_valid || !video_valid) {
+            return;
+        }
+        if (video_pts <= audio_pts + kAvSyncMaxVideoAheadSec ||
+            video_pts < audio_pts - kAvSyncForceDisplayBehindSec) {
+            return;
+        }
+        QThread::usleep(1000);
+        ffmpeg_stream_get_latest_frame(fetcher, frame_copy, copy_buffer_bytes, sequence);
+    }
+}
+
 } /* namespace */
 
 StreamWorker::StreamWorker(QObject *parent) : QThread(parent) {}
@@ -95,7 +127,6 @@ void StreamWorker::run() {
     FFmpegStreamFetcher fetcher{};
     uint8_t *frame_copy = nullptr;
     uint64_t current_sequence = 0U;
-    qint64 last_emit_ms = 0;
     unsigned qr_push_skip = 0U;
 
     m_fetcher = &fetcher;
@@ -171,18 +202,22 @@ void StreamWorker::run() {
                 break;
             }
 
-            const qint64 now_emit = QDateTime::currentMSecsSinceEpoch();
-            if (now_emit - last_emit_ms >= 33) {
-                QImage img(
-                    frame_copy,
-                    canvasW,
-                    canvasH,
-                    canvasW * 3,
-                    QImage::Format_BGR888
-                );
-                emit frameReady(img.copy());
-                last_emit_ms = now_emit;
-            }
+            waitAvSyncThenRefresh(
+                &fetcher,
+                frame_copy,
+                copy_buffer_bytes,
+                &current_sequence,
+                m_config.enable_audio
+            );
+
+            QImage img(
+                frame_copy,
+                canvasW,
+                canvasH,
+                canvasW * 3,
+                QImage::Format_BGR888
+            );
+            emit frameReady(img.copy());
         } else {
             QThread::msleep(1);
         }

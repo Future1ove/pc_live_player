@@ -8,6 +8,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 
@@ -66,12 +67,12 @@ static enum AVPixelFormat select_hw_format(AVCodecContext *ctx, const enum AVPix
         ++current;
     }
 
-    fprintf(stderr, "CUDA 硬件像素格式不可用，回退到软件解码。\n");
+    fprintf(stderr, "D3D11VA 硬件像素格式不可用，回退到软件解码。\n");
     return pix_fmts[0];
 }
 
 static bool init_video_hw_decoder(FFmpegStreamFetcher *fetcher) {
-    enum AVHWDeviceType device_type = av_hwdevice_find_type_by_name("cuda");
+    enum AVHWDeviceType device_type = av_hwdevice_find_type_by_name("d3d11va");
     const AVCodecHWConfig *config = 0;
     int i = 0;
 
@@ -148,7 +149,7 @@ static bool open_stream_decoder(
     }
 
     if (use_hw_for_video && fetcher->config.use_gpu && !init_video_hw_decoder(fetcher)) {
-        fprintf(stderr, "GPU 解码初始化失败，自动回退 CPU。\n");
+        fprintf(stderr, "D3D11VA 硬件解码初始化失败，自动回退 CPU。\n");
         fetcher->config.use_gpu = false;
     }
 
@@ -280,28 +281,9 @@ static bool convert_frame_to_canvas(FFmpegStreamFetcher *fetcher, const AVFrame 
         if (src_h < 2) {
             src_h = 2;
         }
-        /* 与 GUI 侧最大缓冲一致；超过 4K 的源流按宽高比缩放到画布内 */
-        {
-            const int max_w = 3840;
-            const int max_h = 2160;
-            int nw = src_w;
-            int nh = src_h;
-            if (nw > max_w || nh > max_h) {
-                double sx = (double)max_w / (double)nw;
-                double sy = (double)max_h / (double)nh;
-                double s = sx < sy ? sx : sy;
-                nw = (int)((double)nw * s) & ~1;
-                nh = (int)((double)nh * s) & ~1;
-                if (nw < 2) {
-                    nw = 2;
-                }
-                if (nh < 2) {
-                    nh = 2;
-                }
-            }
-            fetcher->config.output_width = nw;
-            fetcher->config.output_height = nh;
-        }
+        /* 画布尺寸完全跟随源流（仅做偶数对齐） */
+        fetcher->config.output_width = src_w;
+        fetcher->config.output_height = src_h;
         fetcher->latest_bgr_size =
             (size_t)fetcher->config.output_width * (size_t)fetcher->config.output_height * 3U;
         free(fetcher->latest_bgr);
@@ -357,6 +339,13 @@ static bool convert_frame_to_canvas(FFmpegStreamFetcher *fetcher, const AVFrame 
         fetcher->work_bgr = tmp;
         fetcher->latest_sequence += 1U;
         fetcher->frame_ready = true;
+        if (frame->pts != AV_NOPTS_VALUE && fetcher->format_ctx != 0 &&
+            fetcher->video_stream_index >= 0) {
+            const AVRational tb =
+                fetcher->format_ctx->streams[fetcher->video_stream_index]->time_base;
+            fetcher->latest_video_pts_sec = (double)frame->pts * av_q2d(tb);
+            fetcher->latest_video_pts_valid = true;
+        }
     }
     SDL_UnlockMutex(fetcher->frame_mutex);
     return true;
@@ -370,7 +359,7 @@ static bool process_video_frame(FFmpegStreamFetcher *fetcher, AVFrame *frame) {
         av_frame_unref(fetcher->video_transfer_frame);
         ret = av_hwframe_transfer_data(fetcher->video_transfer_frame, frame, 0);
         if (ret < 0) {
-            set_error(fetcher, "GPU 帧回传失败", ret);
+            set_error(fetcher, "D3D11VA 帧回传失败", ret);
             return false;
         }
         source_frame = fetcher->video_transfer_frame;
@@ -380,11 +369,20 @@ static bool process_video_frame(FFmpegStreamFetcher *fetcher, AVFrame *frame) {
 }
 
 static bool process_audio_frame(FFmpegStreamFetcher *fetcher, AVFrame *frame) {
+    double pts_seconds = -1.0;
+
     if (!fetcher->config.enable_audio) {
         return true;
     }
 
-    return audio_output_queue_frame(&fetcher->audio_output, frame);
+    if (frame->pts != AV_NOPTS_VALUE && fetcher->format_ctx != 0 &&
+        fetcher->audio_stream_index >= 0) {
+        const AVRational tb =
+            fetcher->format_ctx->streams[fetcher->audio_stream_index]->time_base;
+        pts_seconds = (double)frame->pts * av_q2d(tb);
+    }
+
+    return audio_output_queue_frame(&fetcher->audio_output, frame, pts_seconds);
 }
 
 static bool drain_decoder_frames(
@@ -395,24 +393,20 @@ static bool drain_decoder_frames(
     int ret;
 
     if (is_video) {
-        /* 一轮 receive 可能吐出多帧，只缩放/显示最后一帧，减轻 CPU 与主线程积压 */
+        /* 每帧都入画布，便于预览帧率尽量跟源流 */
         while (!fetcher->stop_requested) {
             ret = avcodec_receive_frame(codec_ctx, frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                if (fetcher->video_drain_hold != 0 && fetcher->video_drain_hold->width > 0) {
-                    if (!process_video_frame(fetcher, fetcher->video_drain_hold)) {
-                        fprintf(stderr, "视频帧转换失败。\n");
-                    }
-                    av_frame_unref(fetcher->video_drain_hold);
-                }
                 return true;
             }
             if (ret < 0) {
                 set_error(fetcher, "接收视频帧失败", ret);
                 return false;
             }
-            av_frame_unref(fetcher->video_drain_hold);
-            av_frame_move_ref(fetcher->video_drain_hold, frame);
+            if (!process_video_frame(fetcher, frame)) {
+                fprintf(stderr, "视频帧转换失败。\n");
+            }
+            av_frame_unref(frame);
         }
         return true;
     }
@@ -634,6 +628,29 @@ static int decode_thread(void *userdata) {
     av_dict_set(&options, "reconnect_streamed", "1", 0);
     av_dict_set(&options, "reconnect_delay_max", "5", 0);
 
+    if (strstr(fetcher->config.url, "douyincdn.com") != 0 ||
+        strstr(fetcher->config.url, "pull-flv") != 0 ||
+        strstr(fetcher->config.url, "douyin.com") != 0) {
+        av_dict_set(
+            &options,
+            "headers",
+            "Referer: https://live.douyin.com/\r\n"
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n",
+            0
+        );
+    } else if (strstr(fetcher->config.url, "xhscdn.com") != 0 ||
+               strstr(fetcher->config.url, "xiaohongshu.com") != 0) {
+        av_dict_set(
+            &options,
+            "headers",
+            "Referer: https://www.xiaohongshu.com/\r\n"
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n",
+            0
+        );
+    }
+
     fetcher->format_ctx = avformat_alloc_context();
     if (fetcher->format_ctx == 0) {
         snprintf(fetcher->last_error, sizeof(fetcher->last_error), "分配格式上下文失败");
@@ -676,14 +693,14 @@ static int decode_thread(void *userdata) {
             vcodec,
             vp->width,
             vp->height,
-            fetcher->config.use_gpu ? " (GPU)" : " (CPU)"
+            fetcher->config.use_gpu ? " (D3D11VA)" : " (CPU)"
         );
         if (fetcher->video_codec_ctx != 0 &&
             fetcher->video_codec_ctx->codec_id == AV_CODEC_ID_HEVC &&
             !fetcher->config.use_gpu) {
             fprintf(
                 stderr,
-                "提示: HEVC/H.265 软件解码负载很高，建议开启 GPU 或降低解码分辨率。\n"
+                "提示: HEVC/H.265 软件解码负载很高，当前 D3D11VA 不可用。\n"
             );
         }
     }
@@ -703,8 +720,10 @@ static int decode_thread(void *userdata) {
     set_status(
         fetcher,
         fetcher->config.enable_audio ?
-            (fetcher->config.use_gpu ? "直播流连接成功，GPU 视频解码 + SDL 音频中" : "直播流连接成功，CPU 视频解码 + SDL 音频中") :
-            (fetcher->config.use_gpu ? "直播流连接成功，GPU 解码中" : "直播流连接成功，CPU 解码中")
+            (fetcher->config.use_gpu ?
+                 "直播流连接成功，D3D11VA 视频解码 + SDL 音频中" :
+                 "直播流连接成功，CPU 视频解码 + SDL 音频中") :
+            (fetcher->config.use_gpu ? "直播流连接成功，D3D11VA 硬件解码中" : "直播流连接成功，CPU 解码中")
     );
 
     while (!fetcher->stop_requested) {
@@ -845,6 +864,49 @@ void ffmpeg_stream_get_canvas_size(const FFmpegStreamFetcher *fetcher, int *out_
     }
     *out_w = fetcher->config.output_width;
     *out_h = fetcher->config.output_height;
+}
+
+double ffmpeg_stream_get_latest_video_pts(const FFmpegStreamFetcher *fetcher, bool *out_valid) {
+    double pts = 0.0;
+    bool valid = false;
+
+    if (fetcher == 0) {
+        if (out_valid != 0) {
+            *out_valid = false;
+        }
+        return 0.0;
+    }
+
+    if (fetcher->frame_mutex != 0) {
+        SDL_LockMutex((SDL_mutex *)fetcher->frame_mutex);
+        valid = fetcher->latest_video_pts_valid;
+        pts = fetcher->latest_video_pts_sec;
+        SDL_UnlockMutex((SDL_mutex *)fetcher->frame_mutex);
+    }
+
+    if (out_valid != 0) {
+        *out_valid = valid;
+    }
+    return pts;
+}
+
+double ffmpeg_stream_get_audio_playback_pts(const FFmpegStreamFetcher *fetcher, bool *out_valid) {
+    bool valid = false;
+    double pts = -1.0;
+
+    if (fetcher == 0 || !fetcher->config.enable_audio) {
+        if (out_valid != 0) {
+            *out_valid = false;
+        }
+        return -1.0;
+    }
+
+    pts = audio_output_get_playback_pts(&fetcher->audio_output);
+    valid = pts >= 0.0;
+    if (out_valid != 0) {
+        *out_valid = valid;
+    }
+    return pts;
 }
 
 void ffmpeg_stream_stop(FFmpegStreamFetcher *fetcher) {
