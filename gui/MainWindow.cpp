@@ -28,7 +28,6 @@
 #include <QScreen>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QCheckBox>
 #include <QSizePolicy>
 
 extern "C" {
@@ -379,9 +378,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *qrGroup = new QGroupBox(QStringLiteral("当前二维码"));
     auto *qrLay = new QVBoxLayout(qrGroup);
 
-    m_fullResCheck = new QCheckBox(QStringLiteral("全图识别（关则仅扫画面中央约 60%）"));
-    m_fullResCheck->setChecked(false);
-    qrLay->addWidget(m_fullResCheck);
+    m_qrToggleBtn = new QPushButton(QStringLiteral("开启识别"));
+    m_qrToggleBtn->setObjectName(QStringLiteral("btnQrOff"));
+    m_qrToggleBtn->setCursor(Qt::PointingHandCursor);
+    m_qrToggleBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_qrToggleBtn->setStyleSheet(QStringLiteral(
+        "QPushButton#btnQrOff {"
+        "background-color: rgba(100, 116, 139, 0.3);"
+        "color: #94a3b8; font-size: 14px; font-weight: 700;"
+        "padding: 10px 16px; border-radius: 8px;"
+        "border: 1px solid rgba(148, 163, 184, 0.3);"
+        "}"
+        "QPushButton#btnQrOff:hover {"
+        "background-color: rgba(100, 116, 139, 0.45);"
+        "color: #cbd5e1;"
+        "}"
+    ));
+    connect(m_qrToggleBtn, &QPushButton::clicked, this, &MainWindow::toggleQrDetection);
+    qrLay->addWidget(m_qrToggleBtn);
 
     m_currentQrLabel = new QLabel(QStringLiteral("当前：无"));
     m_currentQrLabel->setObjectName(QStringLiteral("currentQrLabel"));
@@ -561,9 +575,24 @@ void MainWindow::startDetection() {
 
     m_lastQr.clear();
     m_qrCount = 0;
+    m_qrActive = false;
     m_historyText->clear();
     m_currentQrLabel->setText(QStringLiteral("当前：无"));
     m_qrCountLabel->setText(QStringLiteral("累计识别：0 次"));
+    m_qrToggleBtn->setText(QStringLiteral("开启识别"));
+    m_qrToggleBtn->setObjectName(QStringLiteral("btnQrOff"));
+    m_qrToggleBtn->setStyleSheet(QStringLiteral(
+        "QPushButton#btnQrOff {"
+        "background-color: rgba(100, 116, 139, 0.3);"
+        "color: #94a3b8; font-size: 14px; font-weight: 700;"
+        "padding: 10px 16px; border-radius: 8px;"
+        "border: 1px solid rgba(148, 163, 184, 0.3);"
+        "}"
+        "QPushButton#btnQrOff:hover {"
+        "background-color: rgba(100, 116, 139, 0.45);"
+        "color: #cbd5e1;"
+        "}"
+    ));
 
     AppConfig cfg{};
     app_set_default_config(&cfg);
@@ -571,8 +600,7 @@ void MainWindow::startDetection() {
     std::snprintf(cfg.url, sizeof(cfg.url), "%s", streamUtf8.constData());
     cfg.use_gpu = true;
     cfg.enable_audio = true;
-    cfg.detector_mode =
-        m_fullResCheck->isChecked() ? QR_DETECTOR_MODE_FULL_RES : QR_DETECTOR_MODE_FAST;
+    cfg.detector_mode = QR_DETECTOR_MODE_FULL_RES;
     cfg.use_native_resolution = true;
     cfg.output_width = 0;
     cfg.output_height = 0;
@@ -586,6 +614,7 @@ void MainWindow::startDetection() {
 
     m_worker = new StreamWorker(this);
     m_worker->setConfig(cfg);
+    m_worker->setQrEnabled(m_qrActive);
 
     connect(m_worker, &StreamWorker::frameReady, this, &MainWindow::onFrameReady, Qt::QueuedConnection);
     connect(m_worker, &StreamWorker::qrDetected, this, &MainWindow::onQrDetected, Qt::QueuedConnection);
@@ -596,7 +625,6 @@ void MainWindow::startDetection() {
 
     m_stopBtn->setEnabled(true);
     m_urlInput->setEnabled(false);
-    m_fullResCheck->setEnabled(false);
 }
 
 void MainWindow::stopDetection() {
@@ -627,7 +655,6 @@ void MainWindow::stopDetection() {
     m_startBtn->setText(QStringLiteral("开始检测"));
     m_stopBtn->setEnabled(false);
     m_urlInput->setEnabled(true);
-    m_fullResCheck->setEnabled(true);
     m_statusLabel->setText(QStringLiteral("状态 · 已停止"));
 }
 
@@ -742,6 +769,45 @@ void MainWindow::clearHistory() {
     m_currentQrLabel->setText(QStringLiteral("当前：无"));
     m_qrCountLabel->setText(QStringLiteral("累计识别：0 次"));
     resetQrHighlight();
+}
+
+void MainWindow::toggleQrDetection() {
+    m_qrActive = !m_qrActive;
+
+    if (m_qrActive) {
+        m_qrToggleBtn->setText(QStringLiteral("关闭识别"));
+        m_qrToggleBtn->setObjectName(QStringLiteral("btnQrOn"));
+        m_qrToggleBtn->setStyleSheet(QStringLiteral(
+            "QPushButton#btnQrOn {"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0d9488, stop:1 #047857);"
+            "color: #ecfdf5; font-size: 14px; font-weight: 700;"
+            "padding: 10px 16px; border-radius: 8px;"
+            "border: 1px solid rgba(45, 212, 191, 0.45);"
+            "}"
+            "QPushButton#btnQrOn:hover {"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #14b8a6, stop:1 #0d9488);"
+            "}"
+        ));
+    } else {
+        m_qrToggleBtn->setText(QStringLiteral("开启识别"));
+        m_qrToggleBtn->setObjectName(QStringLiteral("btnQrOff"));
+        m_qrToggleBtn->setStyleSheet(QStringLiteral(
+            "QPushButton#btnQrOff {"
+            "background-color: rgba(100, 116, 139, 0.3);"
+            "color: #94a3b8; font-size: 14px; font-weight: 700;"
+            "padding: 10px 16px; border-radius: 8px;"
+            "border: 1px solid rgba(148, 163, 184, 0.3);"
+            "}"
+            "QPushButton#btnQrOff:hover {"
+            "background-color: rgba(100, 116, 139, 0.45);"
+            "color: #cbd5e1;"
+            "}"
+        ));
+    }
+
+    if (m_worker != nullptr) {
+        m_worker->setQrEnabled(m_qrActive);
+    }
 }
 
 void MainWindow::toggleFullscreen() {

@@ -58,6 +58,10 @@ void StreamWorker::setConfig(const AppConfig &config) {
     m_config = config;
 }
 
+void StreamWorker::setQrEnabled(bool enabled) {
+    m_qrEnabled.store(enabled, std::memory_order_release);
+}
+
 void StreamWorker::requestStop() {
     /* 禁止在 GUI 线程调用 ffmpeg_stream_stop：会阻塞界面直至解码线程结束，表现为卡死。
      * 结束拉流只在 run() 收尾由工作线程执行 ffmpeg_stream_destroy。 */
@@ -74,7 +78,8 @@ void StreamWorker::qrThreadMain() {
     }
 
     QRDetector detector{};
-    if (!qr_detector_init(&detector, m_config.detector_mode, m_config.roi_ratio)) {
+    /* 始终使用全图识别模式 */
+    if (!qr_detector_init(&detector, QR_DETECTOR_MODE_FULL_RES, m_config.roi_ratio)) {
         emit errorOccurred(QStringLiteral("二维码检测器初始化失败"));
         return;
     }
@@ -86,6 +91,13 @@ void StreamWorker::qrThreadMain() {
     uint64_t lastVer = 0U;
 
     while (!m_qrThreadStop.load(std::memory_order_acquire)) {
+        /* 未启用时跳过检测，避免空转浪费 CPU */
+        if (!m_qrEnabled.load(std::memory_order_acquire)) {
+            QThread::msleep(50);
+            lastVer = m_qrFrameVersion.load(std::memory_order_acquire);
+            continue;
+        }
+
         const uint64_t ver = m_qrFrameVersion.load(std::memory_order_acquire);
         if (ver == lastVer) {
             QThread::msleep(1);

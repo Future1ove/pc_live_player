@@ -23,6 +23,7 @@ public:
     explicit StreamWorker(QObject *parent = nullptr);
 
     void setConfig(const AppConfig &config);
+    void setQrEnabled(bool enabled);
     void requestStop();
 
 signals:
@@ -40,6 +41,7 @@ private:
     AppConfig m_config{};
     std::atomic<bool> m_stop{false};
     std::atomic<bool> m_qrThreadStop{false};
+    std::atomic<bool> m_qrEnabled{false};
     FFmpegStreamFetcher *m_fetcher{nullptr};
 
     std::mutex m_qrMutex;

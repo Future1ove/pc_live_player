@@ -14,7 +14,6 @@ class QTimer;
 class QTextEdit;
 class UrlInputEdit;
 class QPushButton;
-class QCheckBox;
 class QVBoxLayout;
 class QWidget;
 class StreamWorker;
@@ -42,6 +41,7 @@ private slots:
     void stopDetection();
     void toggleFullscreen();
     void clearHistory();
+    void toggleQrDetection();
     void onFrameReady(const QImage &image);
     void onQrDetected(const QString &text);
     void onError(const QString &text);
@@ -63,7 +63,7 @@ private:
     QTimer *m_keyExpiryTimer{nullptr};
     QDateTime m_keyExpiresAt;
     UrlInputEdit *m_urlInput{nullptr};
-    QCheckBox *m_fullResCheck{nullptr};
+    QPushButton *m_qrToggleBtn{nullptr};
     QPushButton *m_startBtn{nullptr};
     QPushButton *m_fullscreenBtn{nullptr};
     QPushButton *m_stopBtn{nullptr};
@@ -78,6 +78,7 @@ private:
     QString m_lastQr;
     int m_qrCount{0};
     bool m_isFullscreen{false};
+    bool m_qrActive{false};
 
     QImage m_pendingVideoFrame;
     bool m_videoFlushScheduled{false};
